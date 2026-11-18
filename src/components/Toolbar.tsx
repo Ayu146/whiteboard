@@ -1,222 +1,257 @@
-import { useEffect, useRef, useState } from "react";
-import type { ComponentType } from "react";
+import { useRef, useState } from "react";
 import {
   MousePointer2,
   Hand,
-  Pencil,
-  Eraser,
-  Shapes,
+  Spline,
   Type,
-  ArrowUpRight,
-  Image as ImageIcon,
+  Shapes,
+  ImagePlus,
   Undo2,
   Redo2,
-  Trash2,
 } from "lucide-react";
 import { useBoard } from "../store";
+import { shapePath } from "../utils/shapes";
 import { screenToWorld } from "../utils/coords";
 import { DEFAULT_FONT } from "../utils/textLayout";
-import type { ShapeKind } from "../types";
-import ShapePicker from "./ShapePicker";
+import { addImageFiles } from "../utils/images";
+import type { ShapeKind, Tool } from "../types";
 
-const uid = () => crypto.randomUUID();
+const isMac =
+  typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+const MOD = isMac ? "⌘" : "Ctrl+";
 
-type IconType = ComponentType<{ size?: number; strokeWidth?: number }>;
+const KINDS: ShapeKind[] = [
+  "square", "rounded", "circle", "diamond", "triangle", "invTriangle",
+  "parallelogramR", "parallelogramL", "trapezoid", "pentagon", "hexagon", "octagon",
+  "star", "plus", "arrowLeft", "arrowRight", "chevron", "speech",
+  "cylinder", "document", "process", "slanted", "frame",
+];
 
-function ToolButton({
-  icon: Icon,
-  label,
-  active = false,
-  disabled = false,
-  onClick,
-}: {
-  icon: IconType;
-  label: string;
-  active?: boolean;
-  disabled?: boolean;
-  onClick?: () => void;
-}) {
-  return (
-    <button
-      title={disabled ? `${label} (coming soon)` : label}
-      aria-label={label}
-      disabled={disabled}
-      onClick={onClick}
-      style={{
-        width: 36,
-        height: 36,
-        display: "grid",
-        placeItems: "center",
-        border: "none",
-        borderRadius: 10,
-        cursor: disabled ? "not-allowed" : "pointer",
-        opacity: disabled ? 0.35 : 1,
-        background: active ? "var(--primary-soft)" : "transparent",
-        color: active ? "var(--primary)" : "var(--text-2)",
-        transition: "background .15s, color .15s",
-      }}
-      onMouseEnter={(e) => {
-        if (!active && !disabled)
-          e.currentTarget.style.background = "var(--surface-hover)";
-      }}
-      onMouseLeave={(e) => {
-        if (!active) e.currentTarget.style.background = "transparent";
-      }}
-    >
-      <Icon size={20} strokeWidth={1.75} />
-    </button>
-  );
+const FILL = "#ddd6fe";
+
+const pill = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  gap: 4,
+  padding: 6,
+  background: "var(--surface)",
+  borderRadius: 14,
+  boxShadow: "0 4px 16px var(--shadow)",
+} as const;
+
+function btnStyle(active: boolean, enabled = true) {
+  return {
+    width: 40,
+    height: 40,
+    display: "grid",
+    placeItems: "center",
+    border: "none",
+    borderRadius: 10,
+    background: active ? "var(--primary)" : "transparent",
+    color: active ? "#ffffff" : "var(--text)",
+    opacity: enabled ? 1 : 0.35,
+    cursor: enabled ? "pointer" : "default",
+  } as const;
 }
 
-const Divider = () => (
-  <div
-    style={{ height: 1, width: 24, background: "var(--border)", margin: "4px 0" }}
-  />
-);
+const divider = {
+  width: 24,
+  height: 1,
+  background: "var(--text-2)",
+  opacity: 0.25,
+  margin: "2px 0",
+} as const;
 
 export default function Toolbar() {
-  const addObject = useBoard((s) => s.addObject);
-  const viewport = useBoard((s) => s.viewport);
-  const selectedIds = useBoard((s) => s.selectedIds);
-  const selectedConnectorId = useBoard((s) => s.selectedConnectorId);
-  const select = useBoard((s) => s.select);
-  const deleteObjects = useBoard((s) => s.deleteObjects);
-  const deleteConnector = useBoard((s) => s.deleteConnector);
-  const setEditing = useBoard((s) => s.setEditing);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [shapesOpen, setShapesOpen] = useState(false);
+
   const tool = useBoard((s) => s.tool);
   const setTool = useBoard((s) => s.setTool);
+  const canUndo = useBoard((s) => s.past.length > 0);
+  const canRedo = useBoard((s) => s.future.length > 0);
+  const undo = useBoard((s) => s.undo);
+  const redo = useBoard((s) => s.redo);
 
-  const [shapesOpen, setShapesOpen] = useState(false);
-  const shapesRef = useRef<HTMLDivElement>(null);
-
-  // close the shape popup on outside click or Escape
-  useEffect(() => {
-    if (!shapesOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (!shapesRef.current?.contains(e.target as Node)) setShapesOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setShapesOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [shapesOpen]);
-
-  // place new things at the center of what the user currently sees
-  const center = () =>
-    screenToWorld(window.innerWidth / 2, window.innerHeight / 2, viewport);
-
-  const addShape = (shape: ShapeKind) => {
-    const c = center();
-    const id = uid();
-    addObject({
-      id,
-      type: "shape",
-      shape,
-      x: c.x - 80,
-      y: c.y - 80,
-      width: 160,
-      height: 160,
-      rotation: 0,
-      fill: "#d3c0ff",
-    });
-    select([id]); // select it right away so the popup appears
-    setTool("select");
+  const pickTool = (t: Tool) => {
+    setTool(t);
     setShapesOpen(false);
   };
 
-  // adds a text and opens it for typing right away
+  const addShape = (kind: ShapeKind) => {
+    const st = useBoard.getState();
+    const c = screenToWorld(window.innerWidth / 2, window.innerHeight / 2, st.viewport);
+    const w = kind === "frame" ? 320 : 140;
+    const h = kind === "frame" ? 220 : 100;
+    const id = crypto.randomUUID();
+    st.addObject({
+      id,
+      type: "shape",
+      shape: kind,
+      fill: FILL,
+      x: c.x - w / 2,
+      y: c.y - h / 2,
+      width: w,
+      height: h,
+      rotation: 0,
+    });
+    st.select([id]);
+    st.setTool("select");
+    setShapesOpen(false);
+  };
+
   const addText = () => {
-    const c = center();
-    const id = uid();
-    addObject({
+    const st = useBoard.getState();
+    const c = screenToWorld(window.innerWidth / 2, window.innerHeight / 2, st.viewport);
+    const id = crypto.randomUUID();
+    st.addObject({
       id,
       type: "text",
+      text: "",
+      fontSize: 24,
+      fontFamily: DEFAULT_FONT,
       x: c.x - 100,
-      y: c.y - 14,
+      y: c.y - 15,
       width: 200,
       height: 30,
       rotation: 0,
-      text: "Text",
-      fontSize: 28,
-      fontFamily: DEFAULT_FONT,
     });
-    select([id]);
-    setTool("select");
-    setEditing(id);
+    st.setTool("select");
+    st.select([id]);
+    st.setEditing(id);
+    setShapesOpen(false);
   };
 
-  const nothingSelected = selectedIds.length === 0 && !selectedConnectorId;
-
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        gap: 2,
-        padding: 6,
-        background: "var(--surface)",
-        borderRadius: 14,
-        boxShadow: "0 4px 16px var(--shadow)",
-        transition: "background 0.25s, box-shadow 0.25s",
-      }}
-    >
-      <ToolButton
-        icon={MousePointer2}
-        label="Select (V)"
-        active={tool === "select"}
-        onClick={() => setTool("select")}
-      />
-      <ToolButton
-        icon={Hand}
-        label="Hand (H)"
-        active={tool === "hand"}
-        onClick={() => setTool("hand")}
-      />
+    <div style={{ position: "relative" }}>
+      <div style={pill}>
+        <button
+          style={btnStyle(tool === "select")}
+          onClick={() => pickTool("select")}
+          title="Select (V)"
+          aria-label="Select"
+        >
+          <MousePointer2 size={19} strokeWidth={1.75} />
+        </button>
+        <button
+          style={btnStyle(tool === "hand")}
+          onClick={() => pickTool("hand")}
+          title="Hand / pan (H)"
+          aria-label="Hand"
+        >
+          <Hand size={19} strokeWidth={1.75} />
+        </button>
+        <button
+          style={btnStyle(tool === "connector")}
+          onClick={() => pickTool("connector")}
+          title="Connector (C)"
+          aria-label="Connector"
+        >
+          <Spline size={19} strokeWidth={1.75} />
+        </button>
 
-      <Divider />
+        <div style={divider} />
 
-      <ToolButton icon={Pencil} label="Pen (P)" disabled />
-      <ToolButton icon={Eraser} label="Eraser (E)" disabled />
-
-      <Divider />
-
-      {/* Shapes button with popup beside it */}
-      <div ref={shapesRef} style={{ position: "relative" }}>
-        <ToolButton
-          icon={Shapes}
-          label="Shapes"
-          active={shapesOpen}
+        <button
+          style={btnStyle(shapesOpen)}
           onClick={() => setShapesOpen((o) => !o)}
-        />
-        {shapesOpen && <ShapePicker onPick={addShape} />}
+          title="Shapes"
+          aria-label="Shapes"
+        >
+          <Shapes size={19} strokeWidth={1.75} />
+        </button>
+        <button style={btnStyle(false)} onClick={addText} title="Text" aria-label="Text">
+          <Type size={19} strokeWidth={1.75} />
+        </button>
+        <button
+          style={btnStyle(false)}
+          onClick={() => fileRef.current?.click()}
+          title="Add image (or drag & drop, or paste)"
+          aria-label="Add image"
+        >
+          <ImagePlus size={19} strokeWidth={1.75} />
+        </button>
+
+        <div style={divider} />
+
+        <button
+          style={btnStyle(false, canUndo)}
+          onClick={() => undo()}
+          disabled={!canUndo}
+          title={`Undo (${MOD}Z)`}
+          aria-label="Undo"
+        >
+          <Undo2 size={19} strokeWidth={1.75} />
+        </button>
+        <button
+          style={btnStyle(false, canRedo)}
+          onClick={() => redo()}
+          disabled={!canRedo}
+          title={`Redo (${MOD}${isMac ? "⇧Z" : "Shift+Z"} or ${MOD}Y)`}
+          aria-label="Redo"
+        >
+          <Redo2 size={19} strokeWidth={1.75} />
+        </button>
       </div>
 
-      <ToolButton icon={Type} label="Text" onClick={addText} />
-      <ToolButton
-        icon={ArrowUpRight}
-        label="Connector (C)"
-        active={tool === "connector"}
-        onClick={() => setTool(tool === "connector" ? "select" : "connector")}
-      />
-      <ToolButton icon={ImageIcon} label="Image (I)" disabled />
+      {shapesOpen && (
+        <div
+          style={{
+            position: "absolute",
+            left: "calc(100% + 10px)",
+            top: 0,
+            display: "grid",
+            gridTemplateColumns: "repeat(6, 40px)",
+            gap: 4,
+            padding: 8,
+            background: "var(--surface)",
+            borderRadius: 14,
+            boxShadow: "0 4px 16px var(--shadow)",
+          }}
+        >
+          {KINDS.map((k) => (
+            <button
+              key={k}
+              title={k}
+              aria-label={k}
+              onClick={() => addShape(k)}
+              style={{
+                width: 40,
+                height: 40,
+                display: "grid",
+                placeItems: "center",
+                border: "none",
+                borderRadius: 10,
+                background: "transparent",
+                cursor: "pointer",
+              }}
+            >
+              <svg width="26" height="26" viewBox="0 0 26 26">
+                <path
+                  d={shapePath(k, 22, 22)}
+                  transform="translate(2 2)"
+                  fill="none"
+                  stroke="var(--text)"
+                  strokeWidth="1.5"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </button>
+          ))}
+        </div>
+      )}
 
-      <Divider />
-
-      <ToolButton icon={Undo2} label="Undo" disabled />
-      <ToolButton icon={Redo2} label="Redo" disabled />
-      <ToolButton
-        icon={Trash2}
-        label="Delete"
-        disabled={nothingSelected}
-        onClick={() => {
-          if (selectedConnectorId) deleteConnector(selectedConnectorId);
-          else deleteObjects(selectedIds);
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        multiple
+        hidden
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? []);
+          e.target.value = "";
+          if (files.length) addImageFiles(files);
         }}
       />
     </div>

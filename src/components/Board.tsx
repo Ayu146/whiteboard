@@ -8,6 +8,7 @@ import {
   Group,
   Line,
   Circle,
+  Image as KImage,
 } from "react-konva";
 import Konva from "konva";
 import { useBoard } from "../store";
@@ -15,6 +16,7 @@ import { shapePath } from "../utils/shapes";
 import { objectBounds, pointInRect } from "../utils/bounds";
 import { screenToWorld, worldToScreen } from "../utils/coords";
 import { DEFAULT_FONT } from "../utils/textLayout";
+import { addImageFiles } from "../utils/images";
 import {
   SIDES,
   anchorPoint,
@@ -58,6 +60,18 @@ type Draft =
   | { mode: "new"; from: ConnEnd; to: ConnEnd; sx: number; sy: number }
   | { mode: "edit"; id: string; which: "from" | "to" };
 
+// true when the keyboard focus is in a field where the user is typing
+function isTyping(t: EventTarget | null) {
+  const el = t as HTMLElement | null;
+  return (
+    !!el &&
+    (el.tagName === "INPUT" ||
+      el.tagName === "TEXTAREA" ||
+      el.tagName === "SELECT" ||
+      el.isContentEditable)
+  );
+}
+
 // topmost shape that contains the world point
 function findShapeAt(
   px: number,
@@ -95,6 +109,7 @@ export default function Board() {
   const marqueeRef = useRef<{ x1: number; y1: number; base: string[] } | null>(
     null
   );
+  const imgCache = useRef<Map<string, HTMLImageElement>>(new Map());
 
   const [size, setSize] = useState({ w: window.innerWidth, h: window.innerHeight });
   const [spaceDown, setSpaceDown] = useState(false);
@@ -103,6 +118,8 @@ export default function Board() {
   const [livePos, setLivePos] = useState<Record<string, Pos> | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [anchorTarget, setAnchorTarget] = useState<AnchorTarget>(null);
+  const [fileDrag, setFileDrag] = useState(false); // a file is being dragged over the page
+  const [imgTick, setImgTick] = useState(0); // bumps when a picture finishes loading
 
   const objects = useBoard((s) => s.objects);
   const connectors = useBoard((s) => s.connectors);
@@ -136,22 +153,36 @@ export default function Board() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
-  // keyboard: Space = pan, Delete, Esc, Ctrl+A, V / H / C tools
+  // load each picture once; draw it when it is ready
   useEffect(() => {
-    const isTyping = (t: EventTarget | null) => {
-      const el = t as HTMLElement | null;
-      return (
-        !!el &&
-        (el.tagName === "INPUT" ||
-          el.tagName === "TEXTAREA" ||
-          el.tagName === "SELECT" ||
-          el.isContentEditable)
-      );
-    };
+    for (const o of Object.values(objects)) {
+      if (o.type !== "image" || imgCache.current.has(o.src)) continue;
+      const img = new window.Image();
+      img.onload = () => setImgTick((n) => n + 1);
+      img.src = o.src;
+      imgCache.current.set(o.src, img);
+    }
+  }, [objects]);
 
+  // keyboard: Space = pan, Delete, Esc, Ctrl+A, Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, V / H / C tools
+  useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (isTyping(e.target)) return;
       const st = useBoard.getState();
+      const mod = e.ctrlKey || e.metaKey;
+      const key = e.key.toLowerCase();
+
+      if (mod && key === "z") {
+        e.preventDefault();
+        if (e.shiftKey) st.redo();
+        else st.undo();
+        return;
+      }
+      if (mod && key === "y") {
+        e.preventDefault();
+        st.redo();
+        return;
+      }
 
       if (e.code === "Space") {
         e.preventDefault();
@@ -161,13 +192,13 @@ export default function Board() {
         else if (st.selectedIds.length) st.deleteObjects(st.selectedIds);
       } else if (e.key === "Escape") {
         st.select([]);
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
+      } else if (mod && key === "a") {
         e.preventDefault();
         st.select(Object.keys(st.objects));
       } else if (!e.ctrlKey && !e.metaKey && !e.altKey) {
-        if (e.key.toLowerCase() === "v") st.setTool("select");
-        if (e.key.toLowerCase() === "h") st.setTool("hand");
-        if (e.key.toLowerCase() === "c") st.setTool("connector");
+        if (key === "v") st.setTool("select");
+        if (key === "h") st.setTool("hand");
+        if (key === "c") st.setTool("connector");
       }
     };
     const onKeyUp = (e: KeyboardEvent) => {
@@ -182,6 +213,68 @@ export default function Board() {
     };
   }, []);
 
+  // paste pictures from the clipboard (screenshots, copied images)
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      if (isTyping(e.target)) return;
+      const files = Array.from(e.clipboardData?.files ?? []).filter((f) =>
+        f.type.startsWith("image/")
+      );
+      if (files.length === 0) return;
+      e.preventDefault();
+      addImageFiles(files);
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, []);
+
+  // drag pictures in from the file explorer
+  useEffect(() => {
+    let depth = 0;
+    const hasFiles = (e: DragEvent) =>
+      !!e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files");
+
+    const onEnter = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth++;
+      setFileDrag(true);
+    };
+    const onOver = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault(); // required, or the browser opens the file instead
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+    };
+    const onLeave = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) setFileDrag(false);
+    };
+    const onDrop = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth = 0;
+      setFileDrag(false);
+      const files = Array.from(e.dataTransfer?.files ?? []).filter((f) =>
+        f.type.startsWith("image/")
+      );
+      if (files.length === 0) return;
+      const st = useBoard.getState();
+      addImageFiles(files, screenToWorld(e.clientX, e.clientY, st.viewport));
+    };
+
+    window.addEventListener("dragenter", onEnter);
+    window.addEventListener("dragover", onOver);
+    window.addEventListener("dragleave", onLeave);
+    window.addEventListener("drop", onDrop);
+    return () => {
+      window.removeEventListener("dragenter", onEnter);
+      window.removeEventListener("dragover", onOver);
+      window.removeEventListener("dragleave", onLeave);
+      window.removeEventListener("drop", onDrop);
+    };
+  }, []);
+
   // attach the resize/rotate handles to the selected nodes
   useEffect(() => {
     const tr = trRef.current;
@@ -192,7 +285,7 @@ export default function Board() {
         : [];
     tr.nodes(nodes);
     tr.getLayer()?.batchDraw();
-  }, [selectedIds, objects, tool, editingId]);
+  }, [selectedIds, objects, tool, editingId, imgTick]);
 
   // selection box (marquee): follow the mouse until it is released
   const marqueeOn = marquee !== null;
@@ -347,6 +440,7 @@ export default function Board() {
     const st = useBoard.getState();
     const o = st.objects[id];
     if (!o) return;
+    if (o.type === "image") return; // pictures have no text
 
     if (o.type === "text") {
       st.select([id]);
@@ -480,17 +574,7 @@ export default function Board() {
     node.scaleX(1);
     node.scaleY(1);
 
-    if (obj.type === "shape") {
-      updateObjects({
-        [id]: {
-          x: node.x(),
-          y: node.y(),
-          rotation: node.rotation(),
-          width: Math.max(20, obj.width * sx),
-          height: Math.max(20, obj.height * sy),
-        },
-      });
-    } else {
+    if (obj.type === "text") {
       updateObjects({
         [id]: {
           x: node.x(),
@@ -498,6 +582,17 @@ export default function Board() {
           rotation: node.rotation(),
           width: Math.max(20, obj.width * sx),
           fontSize: Math.max(8, obj.fontSize * sy),
+        },
+      });
+    } else {
+      // shapes and pictures: scale becomes real width/height
+      updateObjects({
+        [id]: {
+          x: node.x(),
+          y: node.y(),
+          rotation: node.rotation(),
+          width: Math.max(20, obj.width * sx),
+          height: Math.max(20, obj.height * sy),
         },
       });
     }
@@ -635,10 +730,10 @@ export default function Board() {
   }
   const showOverlays = selRect !== null && !marquee && !interacting && !editingId;
 
-  // shapes first, text on top of them
+  // pictures and shapes in the order they were added, text always on top
   const list = Object.values(objects);
   const ordered = [
-    ...list.filter((o) => o.type === "shape"),
+    ...list.filter((o) => o.type !== "text"),
     ...list.filter((o) => o.type === "text"),
   ];
 
@@ -762,6 +857,21 @@ export default function Board() {
                 />
               );
             }
+
+            if (obj.type === "image") {
+              const el = imgCache.current.get(obj.src);
+              if (!el || !el.complete || el.naturalWidth === 0) return null;
+              return (
+                <KImage
+                  key={obj.id}
+                  {...common}
+                  image={el}
+                  width={obj.width}
+                  height={obj.height}
+                />
+              );
+            }
+
             return (
               <Text
                 key={obj.id}
@@ -919,6 +1029,28 @@ export default function Board() {
           color={editingObj.color ?? colors.text}
           onCommit={(value) => commitEdit(editingObj.id, value)}
         />
+      )}
+
+      {/* shown while a file is dragged over the page */}
+      {fileDrag && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 12,
+            zIndex: 50,
+            display: "grid",
+            placeItems: "center",
+            border: "3px dashed var(--primary)",
+            borderRadius: 18,
+            background: "rgba(139, 92, 246, 0.12)",
+            color: "var(--primary)",
+            fontSize: 20,
+            fontWeight: 700,
+            pointerEvents: "none",
+          }}
+        >
+          Drop images to add them to the board
+        </div>
       )}
     </div>
   );

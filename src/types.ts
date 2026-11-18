@@ -53,7 +53,13 @@ export type TextObject = BaseObject & {
   parentId?: string; // id of the shape this text is snapped into
 };
 
-export type BoardObject = ShapeObject | TextObject;
+// a picture dropped or pasted onto the board
+export type ImageObject = BaseObject & {
+  type: "image";
+  src: string; // the image as a data URL (text that contains the whole file)
+};
+
+export type BoardObject = ShapeObject | TextObject | ImageObject;
 
 // ----- connectors -----
 

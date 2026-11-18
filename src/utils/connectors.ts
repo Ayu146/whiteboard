@@ -1,73 +1,64 @@
 import type { BoardObject, ConnEnd, Connector, Side } from "../types";
-import { measureWidth } from "./textLayout";
-import { pointInRect } from "./bounds";
-
-export type Pt = { x: number; y: number };
 
 export const SIDES: Side[] = ["top", "right", "bottom", "left"];
 
-const HEAD = 14; // arrowhead size in world units
+type P = { x: number; y: number };
 
-const sub = (a: Pt, b: Pt): Pt => ({ x: a.x - b.x, y: a.y - b.y });
-const unit = (v: Pt): Pt => {
-  const len = Math.hypot(v.x, v.y);
-  return len < 1e-6 ? { x: 1, y: 0 } : { x: v.x / len, y: v.y / len };
-};
+const rad = (deg: number) => (deg * Math.PI) / 180;
 
-// the box a connector attaches to, in the object's own (unrotated) space.
-// Text uses its real text width, not the wider invisible box around it.
-function localBox(o: BoardObject) {
-  if (o.type === "shape") return { x0: 0, y0: 0, w: o.width, h: o.height };
-  const eff = Math.max(
-    12,
-    Math.min(o.width, measureWidth(o.text, o.fontSize, o.fontFamily))
-  );
-  const x0 = o.parentId ? (o.width - eff) / 2 : 0;
-  return { x0, y0: 0, w: eff, h: o.height };
-}
-
-function toWorld(o: BoardObject, lx: number, ly: number): Pt {
-  const r = (o.rotation * Math.PI) / 180;
+// local point (relative to the object's top-left) -> world point
+function toWorld(o: BoardObject, lx: number, ly: number): P {
+  const r = rad(o.rotation);
   const cos = Math.cos(r);
   const sin = Math.sin(r);
   return { x: o.x + lx * cos - ly * sin, y: o.y + lx * sin + ly * cos };
 }
 
-// world position of the middle of one side of an object
-export function anchorPoint(o: BoardObject, side: Side): Pt {
-  const b = localBox(o);
-  const local: Record<Side, [number, number]> = {
-    top: [b.x0 + b.w / 2, b.y0],
-    right: [b.x0 + b.w, b.y0 + b.h / 2],
-    bottom: [b.x0 + b.w / 2, b.y0 + b.h],
-    left: [b.x0, b.y0 + b.h / 2],
-  };
-  const [lx, ly] = local[side];
-  return toWorld(o, lx, ly);
+// world point -> local point
+function toLocal(o: BoardObject, x: number, y: number): P {
+  const r = rad(o.rotation);
+  const cos = Math.cos(r);
+  const sin = Math.sin(r);
+  const dx = x - o.x;
+  const dy = y - o.y;
+  return { x: dx * cos + dy * sin, y: -dx * sin + dy * cos };
 }
 
-// direction pointing out of a side (in world space)
-function sideNormal(rotation: number, side: Side): Pt {
-  const local: Record<Side, Pt> = {
-    top: { x: 0, y: -1 },
-    right: { x: 1, y: 0 },
-    bottom: { x: 0, y: 1 },
-    left: { x: -1, y: 0 },
-  };
-  const n = local[side];
-  const r = (rotation * Math.PI) / 180;
-  return {
-    x: n.x * Math.cos(r) - n.y * Math.sin(r),
-    y: n.x * Math.sin(r) + n.y * Math.cos(r),
-  };
+export function anchorPoint(o: BoardObject, side: Side): P {
+  switch (side) {
+    case "top":
+      return toWorld(o, o.width / 2, 0);
+    case "right":
+      return toWorld(o, o.width, o.height / 2);
+    case "bottom":
+      return toWorld(o, o.width / 2, o.height);
+    default:
+      return toWorld(o, 0, o.height / 2);
+  }
 }
 
-export function nearestSide(o: BoardObject, px: number, py: number): Side {
+// direction pointing out of the object at that side (world space)
+function sideNormal(o: BoardObject, side: Side): P {
+  const local =
+    side === "top"
+      ? { x: 0, y: -1 }
+      : side === "right"
+        ? { x: 1, y: 0 }
+        : side === "bottom"
+          ? { x: 0, y: 1 }
+          : { x: -1, y: 0 };
+  const r = rad(o.rotation);
+  const cos = Math.cos(r);
+  const sin = Math.sin(r);
+  return { x: local.x * cos - local.y * sin, y: local.x * sin + local.y * cos };
+}
+
+export function nearestSide(o: BoardObject, x: number, y: number): Side {
   let best: Side = "top";
   let bestD = Infinity;
   for (const s of SIDES) {
     const p = anchorPoint(o, s);
-    const d = (p.x - px) ** 2 + (p.y - py) ** 2;
+    const d = Math.hypot(p.x - x, p.y - y);
     if (d < bestD) {
       bestD = d;
       best = s;
@@ -76,31 +67,27 @@ export function nearestSide(o: BoardObject, px: number, py: number): Side {
   return best;
 }
 
-// topmost connectable object under a world point (text sits above shapes;
-// text snapped inside a shape is skipped so you connect to the shape itself)
+// topmost object under the point (shapes, pictures and free text can be connected)
 export function hitObject(
-  px: number,
-  py: number,
+  x: number,
+  y: number,
   objects: Record<string, BoardObject>,
   margin: number
 ): BoardObject | null {
   const list = Object.values(objects);
   const ordered = [
-    ...list.filter((o) => o.type === "shape"),
-    ...list.filter((o) => o.type === "text" && !o.parentId),
+    ...list.filter((o) => o.type !== "text"),
+    ...list.filter((o) => o.type === "text"),
   ];
   for (let i = ordered.length - 1; i >= 0; i--) {
     const o = ordered[i];
-    const b = localBox(o);
-    const origin = toWorld(o, b.x0 - margin, b.y0 - margin);
+    if (o.type === "text" && o.parentId) continue; // text inside a shape: the shape is the target
+    const l = toLocal(o, x, y);
     if (
-      pointInRect(px, py, {
-        x: origin.x,
-        y: origin.y,
-        width: b.w + margin * 2,
-        height: b.h + margin * 2,
-        rotation: o.rotation,
-      })
+      l.x >= -margin &&
+      l.x <= o.width + margin &&
+      l.y >= -margin &&
+      l.y <= o.height + margin
     ) {
       return o;
     }
@@ -108,95 +95,94 @@ export function hitObject(
   return null;
 }
 
-function resolveEnd(
-  end: ConnEnd,
-  objects: Record<string, BoardObject>
-): { p: Pt; n: Pt | null } | null {
-  if ("objectId" in end) {
-    const o = objects[end.objectId];
+type Resolved = { p: P; dir: P | null };
+
+function resolve(e: ConnEnd, objects: Record<string, BoardObject>): Resolved | null {
+  if ("objectId" in e) {
+    const o = objects[e.objectId];
     if (!o) return null;
-    return { p: anchorPoint(o, end.side), n: sideNormal(o.rotation, end.side) };
+    return { p: anchorPoint(o, e.side), dir: sideNormal(o, e.side) };
   }
-  return { p: { x: end.x, y: end.y }, n: null };
+  return { p: { x: e.x, y: e.y }, dir: null };
 }
 
-// flat triangle points [x1,y1,x2,y2,x3,y3] for an arrowhead at `tip`
-// pointing in direction `d`
-function headPoints(tip: Pt, d: Pt): number[] {
-  const bx = tip.x - d.x * HEAD;
-  const by = tip.y - d.y * HEAD;
-  const nx = -d.y;
-  const ny = d.x;
-  const w = HEAD * 0.45;
-  return [tip.x, tip.y, bx + nx * w, by + ny * w, bx - nx * w, by - ny * w];
+const norm = (v: P): P => {
+  const l = Math.hypot(v.x, v.y) || 1;
+  return { x: v.x / l, y: v.y / l };
+};
+
+// triangle with its tip at `tip`, pointing along `dir`
+function arrowHead(tip: P, dir: P): number[] {
+  const size = 13;
+  const half = 6;
+  const d = norm(dir);
+  const bx = tip.x - d.x * size;
+  const by = tip.y - d.y * size;
+  return [
+    tip.x, tip.y,
+    bx - d.y * half, by + d.x * half,
+    bx + d.y * half, by - d.x * half,
+  ];
 }
 
 export type ConnectorShape = {
-  d: string; // SVG path of the line
-  p0: Pt; // real start point
-  p3: Pt; // real end point
+  d: string;
   startHead: number[] | null;
   endHead: number[] | null;
   bbox: { minX: number; minY: number; maxX: number; maxY: number };
+  p0: P;
+  p3: P;
 };
 
-// Everything needed to draw a connector. Returns null if an attached object
-// no longer exists.
 export function connectorShape(
   c: Connector,
   objects: Record<string, BoardObject>
 ): ConnectorShape | null {
-  const a = resolveEnd(c.from, objects);
-  const b = resolveEnd(c.to, objects);
+  const a = resolve(c.from, objects);
+  const b = resolve(c.to, objects);
   if (!a || !b) return null;
 
   const p0 = a.p;
   const p3 = b.p;
-  const curved = c.style === "curved";
+  const dist = Math.hypot(p3.x - p0.x, p3.y - p0.y);
 
-  let p1 = p0;
-  let p2 = p3;
-  if (curved) {
-    const dist = Math.hypot(p3.x - p0.x, p3.y - p0.y);
-    const k = Math.max(40, dist * 0.4);
-    const da = a.n ?? unit(sub(p3, p0));
-    const db = b.n ?? unit(sub(p0, p3));
-    p1 = { x: p0.x + da.x * k, y: p0.y + da.y * k };
-    p2 = { x: p3.x + db.x * k, y: p3.y + db.y * k };
+  let d: string;
+  let c1: P = p3; // used to find the arrow direction at the start
+  let c2: P = p0; // used to find the arrow direction at the end
+
+  if (c.style === "curved") {
+    const reach = Math.max(40, dist * 0.4);
+    const toB = norm({ x: p3.x - p0.x, y: p3.y - p0.y });
+    const dirA = a.dir ?? toB;
+    const dirB = b.dir ?? { x: -toB.x, y: -toB.y };
+    c1 = { x: p0.x + dirA.x * reach, y: p0.y + dirA.y * reach };
+    c2 = { x: p3.x + dirB.x * reach, y: p3.y + dirB.y * reach };
+    d = `M ${p0.x} ${p0.y} C ${c1.x} ${c1.y} ${c2.x} ${c2.y} ${p3.x} ${p3.y}`;
+  } else {
+    d = `M ${p0.x} ${p0.y} L ${p3.x} ${p3.y}`;
   }
 
-  // direction of travel into each tip
-  const dStart = unit(curved ? sub(p0, p1) : sub(p0, p3));
-  const dEnd = unit(curved ? sub(p3, p2) : sub(p3, p0));
+  const startHead = c.arrowStart
+    ? arrowHead(p0, { x: p0.x - c1.x, y: p0.y - c1.y })
+    : null;
+  const endHead = c.arrowEnd
+    ? arrowHead(p3, { x: p3.x - c2.x, y: p3.y - c2.y })
+    : null;
 
-  // pull the line back so it ends at the base of the arrowhead
-  const q0 = c.arrowStart
-    ? { x: p0.x - dStart.x * HEAD * 0.8, y: p0.y - dStart.y * HEAD * 0.8 }
-    : p0;
-  const q3 = c.arrowEnd
-    ? { x: p3.x - dEnd.x * HEAD * 0.8, y: p3.y - dEnd.y * HEAD * 0.8 }
-    : p3;
-
-  const d = `M${q0.x} ${q0.y}C${p1.x} ${p1.y} ${p2.x} ${p2.y} ${q3.x} ${q3.y}`;
-
-  const mid = {
-    x: (p0.x + 3 * p1.x + 3 * p2.x + p3.x) / 8,
-    y: (p0.y + 3 * p1.y + 3 * p2.y + p3.y) / 8,
-  };
-  const xs = [p0.x, p3.x, mid.x];
-  const ys = [p0.y, p3.y, mid.y];
+  const xs = [p0.x, p3.x, ...(c.style === "curved" ? [c1.x, c2.x] : [])];
+  const ys = [p0.y, p3.y, ...(c.style === "curved" ? [c1.y, c2.y] : [])];
 
   return {
     d,
-    p0,
-    p3,
-    startHead: c.arrowStart ? headPoints(p0, dStart) : null,
-    endHead: c.arrowEnd ? headPoints(p3, dEnd) : null,
+    startHead,
+    endHead,
     bbox: {
       minX: Math.min(...xs),
       minY: Math.min(...ys),
       maxX: Math.max(...xs),
       maxY: Math.max(...ys),
     },
+    p0,
+    p3,
   };
 }
