@@ -9,6 +9,8 @@ const snapshot = () => {
   return { objects, connectors, viewport };
 };
 
+const currentTheme = () => useBoard.getState().theme;
+
 export function useBoardSync(uid: string, boardId: string) {
   const [status, setStatus] = useState<SyncStatus>("loading");
   const [title, setTitle] = useState("");
@@ -22,7 +24,7 @@ export function useBoardSync(uid: string, boardId: string) {
     const flush = async () => {
       dirty = false;
       try {
-        await saveBoard(uid, boardId, snapshot());
+        await saveBoard(uid, boardId, snapshot(), currentTheme());
         if (!cancelled && !dirty) setStatus("saved");
       } catch {
         if (!cancelled) setStatus("error");
@@ -57,7 +59,8 @@ export function useBoardSync(uid: string, boardId: string) {
       cancelled = true;
       clearTimeout(timer);
       unsub();
-      if (dirty) saveBoard(uid, boardId, snapshot()).catch(() => {});
+      // save the last edit before the board is cleared (snapshot is taken right now)
+      if (dirty) saveBoard(uid, boardId, snapshot(), currentTheme()).catch(() => {});
       useBoard.getState().resetBoard();
     };
   }, [uid, boardId]);
