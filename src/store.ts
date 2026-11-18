@@ -53,6 +53,12 @@ function relayout(objects: Record<string, BoardObject>, ids: string[]) {
   }
 }
 
+export type BoardContent = {
+  objects: Record<string, BoardObject>;
+  connectors: Record<string, Connector>;
+  viewport: Viewport;
+};
+
 type BoardState = {
   objects: Record<string, BoardObject>;
   connectors: Record<string, Connector>;
@@ -62,6 +68,7 @@ type BoardState = {
   editingId: string | null;
   tool: Tool;
   theme: Theme;
+  
 
   addObject: (obj: BoardObject) => void;
   updateObject: (id: string, patch: Partial<BoardObject>) => void;
@@ -76,6 +83,9 @@ type BoardState = {
   setEditing: (id: string | null) => void;
   setTool: (t: Tool) => void;
   toggleTheme: () => void;
+  setBoard: (content: BoardContent) => void; // open a saved board
+  resetBoard: () => void; // empty the board (when leaving it)
+
 };
 
 export const useBoard = create<BoardState>()(
@@ -184,6 +194,28 @@ export const useBoard = create<BoardState>()(
     toggleTheme: () =>
       set((s) => {
         s.theme = s.theme === "light" ? "dark" : "light";
+      }),
+
+    setBoard: (content) =>
+      set((s) => {
+        s.objects = content.objects;
+        s.connectors = content.connectors;
+        s.viewport = content.viewport;
+        s.selectedIds = [];
+        s.selectedConnectorId = null;
+        s.editingId = null;
+        s.tool = "select";
+      }),
+
+    resetBoard: () =>
+      set((s) => {
+        s.objects = {};
+        s.connectors = {};
+        s.viewport = { x: 0, y: 0, zoom: 1 };
+        s.selectedIds = [];
+        s.selectedConnectorId = null;
+        s.editingId = null;
+        s.tool = "select";
       }),
   }))
 );

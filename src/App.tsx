@@ -1,42 +1,29 @@
 import { useEffect } from "react";
-import Board from "./components/Board";
-import Toolbar from "./components/Toolbar";
-import ThemeToggle from "./components/ThemeToggle";
+import { BrowserRouter, Route, Routes, Navigate } from "react-router-dom";
+import { AuthProvider } from "./auth/AuthContext";
 import { useBoard } from "./store";
+import Home from "./pages/Home";
+import BoardPage from "./pages/BoardPage";
 
-export default function App() {
+function useThemeOnRoot() {
   const theme = useBoard((s) => s.theme);
-
-  // apply the theme to the page and remember it
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-    try {
-      localStorage.setItem("theme", theme);
-    } catch {
-      // storage unavailable, ignore
-    }
+    try { localStorage.setItem("theme", theme); } catch { /* ignore */ }
   }, [theme]);
+}
 
+export default function App() {
+  useThemeOnRoot();
   return (
-    <>
-      {/* theme toggle sits above the toolbar as its own separate pill */}
-      <div
-        style={{
-          position: "fixed",
-          left: 20,
-          top: "50%",
-          transform: "translateY(-50%)",
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          gap: 12,
-          zIndex: 10,
-        }}
-      >
-        <ThemeToggle />
-        <Toolbar />
-      </div>
-      <Board />
-    </>
+    <AuthProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/board/:id" element={<BoardPage />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </BrowserRouter>
+    </AuthProvider>
   );
 }
